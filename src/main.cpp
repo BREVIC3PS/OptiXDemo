@@ -11,7 +11,7 @@ int main(int argc, char** argv) {
 		return EXIT_FAILURE;
 	}
 
-	std::string objPath = "D:\\Documents\\CODES\\OptixTest\\assets\\segmented_mesh.obj";
+	std::string objPath = "D:\\Documents\\CODES\\OptixTest\\assets\\NIST_Segmented_voxel0.16.obj";
 	if (!app.loadObj(objPath)) {
 		std::cerr << "Loading OBJ failed" << objPath << "\n";
 		return EXIT_FAILURE;
@@ -32,10 +32,10 @@ int main(int argc, char** argv) {
 		return EXIT_FAILURE;
 	}
 
-	if (!app.saveOutput("output.ppm")) {
+	/*if (!app.saveOutput("output.ppm")) {
 		std::cerr << "out put filed\n";
 		return EXIT_FAILURE;
-	}
+	}*/
 
 	app.cleanup();
 	std::cout << "file saved at output.ppm\n";
