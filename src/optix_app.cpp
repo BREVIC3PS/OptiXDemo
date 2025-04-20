@@ -78,7 +78,7 @@ typedef unsigned long long uint64_t;
 struct LaunchParams
 {
     uint32_t*               visBits;    // upper‑triangular bit‑matrix
-    cudaTextureObject_t     triCentreTex;   // <‑‑ changed  // N centres
+    float3*                 triCentres;
     uint32_t                triCount;   // N
     OptixTraversableHandle  tlas;
 };
@@ -90,13 +90,6 @@ struct PayloadVis { unsigned int flag; };
 
 extern "C" __global__ void __raygen__rg() 
 {
-	if (optixGetLaunchIndex().x == 0 && optixGetLaunchIndex().y == 0) {
-        printf("DBG lp.triCount=%u, lp.triCentreTex=%llu, lp.visBits=%p\n",
-               lp.triCount,
-               (unsigned long long)lp.triCentreTex,
-               (void*)lp.visBits);
-    }
-	
     uint32_t src   = optixGetLaunchIndex().y;   // row
     uint32_t wID   = optixGetLaunchIndex().x;   // word along the row
     uint32_t dst0  = wID << 5;                  // first dest in this word
@@ -108,7 +101,7 @@ extern "C" __global__ void __raygen__rg()
 	// 再算出这一组 32 位 word 的下标
 	uint64_t wordIdx = (rowStart >> 5) + wID;
 
-    float3  o = make_float3(tex1Dfetch<float4>(lp.triCentreTex, src));
+    float3 o = lp.triCentres[src];
     unsigned int bits = 0u;
 
     #pragma unroll
@@ -118,7 +111,7 @@ extern "C" __global__ void __raygen__rg()
         if (dst >= lp.triCount) break;
         if (dst == src) { bits |= 1u << lane; continue; }
 
-		float3 t = make_float3(tex1Dfetch<float4>(lp.triCentreTex, dst));
+		float3 t = lp.triCentres[dst];
         float3 d    = t - o;
         float  dist = length(d);
         float  tmin = 1e-4f;                  // 跳过自身相交
@@ -131,7 +124,7 @@ extern "C" __global__ void __raygen__rg()
         optixTrace( lp.tlas, o, normalize(d),
                     tmin, tmax, 0.f,
                     0xFF,
-                    0,
+                    OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT | OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT,
                     0, 1, 0, vis );
 
         bits |= vis << lane;
@@ -149,7 +142,7 @@ extern "C" __global__ void __miss__ms()
 
 extern "C" __global__ void __anyhit__ah() 
 {
-	printf("blocked: prim=%u\n", optixGetPrimitiveIndex());
+	//printf("blocked: prim=%u\n", optixGetPrimitiveIndex());
     optixSetPayload_0( 0u ); // blocked
     optixTerminateRay();
 }
@@ -221,36 +214,6 @@ bool OptixApp::loadObj(const std::string& filename)
 				(vs[0].z + vs[1].z + vs[2].z) / 3.f));
 		}
 
-		// Convert to float4 (CUDA needs 32‑bit aligned channel) ▼
-		std::vector<float4> centroids4;
-		centroids4.reserve(centroids.size());
-		for (const auto& c : centroids)
-			centroids4.push_back(make_float4(c.x, c.y, c.z, 0.f));
-
-		// --- allocate CUDA array + upload ------------------------------------------
-		cudaChannelFormatDesc chDesc = cudaCreateChannelDesc<float4>();
-		cudaArray_t d_centroidArray;
-		CUDA_CHECK(cudaMallocArray(&d_centroidArray, &chDesc,
-			static_cast<size_t>(centroids4.size()), 1,
-			cudaArrayDefault));
-
-		CUDA_CHECK(cudaMemcpy2DToArray(d_centroidArray, 0, 0,
-			centroids4.data(), sizeof(float4) * centroids4.size(),
-			sizeof(float4) * centroids4.size(), 1,
-			cudaMemcpyHostToDevice));
-
-		// --- create texture object --------------------------------------------------
-		cudaResourceDesc resDesc{};
-		resDesc.resType = cudaResourceTypeArray;
-		resDesc.res.array.array = d_centroidArray;
-
-		cudaTextureDesc texDesc{};
-		texDesc.addressMode[0] = cudaAddressModeClamp;
-		texDesc.filterMode = cudaFilterModePoint;
-		texDesc.readMode = cudaReadModeElementType;
-		texDesc.normalizedCoords = 0;                 // use integer index
-
-		CUDA_CHECK(cudaCreateTextureObject(&texCentroids, &resDesc, &texDesc, nullptr));
 
 	}
 	std::cout << "Loaded " << centroids.size() << " triangles\n";
@@ -492,16 +455,17 @@ bool OptixApp::launch()
 	// Launch params
 	struct Params { 
 		uint32_t* visBits; 
-		cudaTextureObject_t    triCentreTex;   // <‑‑ changed
+		float3* triCentres;
 		uint32_t triCount; 
 		OptixTraversableHandle tlas; } 
 	params;
 	params.visBits = (uint32_t*)d_visBits;
-	params.triCentreTex = texCentroids;
+	params.triCentres = (float3*)d_triCentre;
 	params.triCount = N;
 	params.tlas = gasHandle;
 
-	CUdeviceptr d_params; CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_params), sizeof(params)));
+	CUdeviceptr d_params; 
+	CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_params), sizeof(params)));
 	CUDA_CHECK(cudaMemcpy((void*)d_params, &params, sizeof(params), cudaMemcpyHostToDevice));
 
 	uint32_t wordsPerRow = (N + 31) >> 5;
