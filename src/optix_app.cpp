@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cassert>
 #include <fstream>
+#include <thread>
 
 //------------------------------------------------------------------------------
 //  Helpers
@@ -440,7 +441,7 @@ bool OptixApp::launch()
 
 	// Vis matrix words (upper‑triangle)
 	uint32_t wordsPerRow = (N + 31) >> 5;
-	const uint64_t totalWords = ((uint64_t)N * (N + 31ull)) >> 5;  // N*(N+31)/32
+	uint64_t totalWords = uint64_t(wordsPerRow) * N;
 	CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_visBits), totalWords * sizeof(uint32_t)));
 	CUDA_CHECK(cudaMemset((void*)d_visBits, 0, totalWords * sizeof(uint32_t)));
 
@@ -492,12 +493,48 @@ bool OptixApp::launch()
 		}
 	}
 
-	std::ofstream fout("vis.bin", std::ios::binary);
+	std::string outputPrefix = "VMCache";
+	bool showProgress = true;
+
+	int threadCount = max(1u, std::thread::hardware_concurrency() - 1);
+	std::vector<std::ofstream> ofs(threadCount);
+	for (int t = 0; t < threadCount; ++t) {
+		std::string fn = outputPrefix + "_" + std::to_string(t) + ".bin";
+		ofs[t].open(fn, std::ios::binary | std::ios::trunc);
+		if (!ofs[t]) {
+			std::cerr << "Failed to open " << fn << "\n";
+			return false;
+		}
+	}
+
+	size_t rowByteCount = (N + 7) >> 3;  // ceil(N bits / 8)
+
+	for (uint32_t id = 0; id < N; ++id) {
+		if (showProgress && id % max(1u, N / 100u) == 0) {
+			std::cout << "\rProgress: " << (id * 100 / N) << "%  " << std::flush;
+		}
+
+		// hostBits is stored at uint32_t , locate id-th row
+		// skip those bits within range (rowByteCount*8,wordsPerRow*32] every row
+		const uint32_t* rowWords = hostBits.data() + id * wordsPerRow;
+
+		// get the lowest rowByteCount byte
+		const char* rowBytes = reinterpret_cast<const char*>(rowWords);
+
+		// write [rowID][rowByteCount bytes][rowID][rowByteCount bytes][rowID][rowByteCount bytes]...
+		// note: you need to copy config.txt to make the saved files readable for LoadVisibilityMatrix_Bitset
+		int tid = id % threadCount;
+		ofs[tid].write(reinterpret_cast<const char*>(&id), sizeof(id));
+		ofs[tid].write(rowBytes, rowByteCount);
+	}
+	if (showProgress) std::cout << "\rProgress: 100%\n";
+
+	for (auto& f : ofs) f.close();
+
+	/*std::ofstream fout("vis.bin", std::ios::binary);
 	fout.write(reinterpret_cast<char*>(hostBits.data()),
 		hostBits.size() * sizeof(uint32_t));
-	fout.close();
-
-
+	fout.close();*/
 
 	CUDA_CHECK(cudaFree((void*)d_params));
 	return true;
