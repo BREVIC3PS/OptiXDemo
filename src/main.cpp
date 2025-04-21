@@ -38,6 +38,5 @@ int main(int argc, char** argv) {
 	}*/
 
 	app.cleanup();
-	std::cout << "file saved at output.ppm\n";
 	return EXIT_SUCCESS;
 }

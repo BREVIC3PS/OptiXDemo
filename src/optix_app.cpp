@@ -287,7 +287,7 @@ bool OptixApp::buildAccel()
 	}
 
 	CUDA_CHECK(cudaFree(reinterpret_cast<void*>(d_gasOutputBuffer)));
-	gasHandle = compactedAccelHandle;   // 用压缩后的 handle 替换
+	gasHandle = compactedAccelHandle;
 	d_gasOutputBuffer = d_compactedOutputBuffer;
 
 	// upload centroids
@@ -483,8 +483,6 @@ bool OptixApp::launch()
 			for (int lane = 0; lane < 32; ++lane) {
 				uint32_t j = (w << 5) + lane;
 				if (j < N && j > i) {
-					// bit (i,j) 存在 word 的 lane 位上
-					// 把它写到 (j,i) 上：
 					uint32_t dstWordIdx = j * wordsPerRow + (i >> 5);
 					uint32_t  dstLane = i & 31;
 					if (word & (1u << lane))
