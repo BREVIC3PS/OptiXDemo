@@ -1,9 +1,3 @@
-//------------------------------------------------------------------------------
-//  OptiX 9.0 – Triangle‑to‑Triangle Visibility Matrix Demo
-//  Complete, single‑file example (C++17).
-//  ‑ 2025‑04‑17 – ChatGPT
-//------------------------------------------------------------------------------
-
 #include "optix_app.h"
 #include <cuda_runtime.h>
 #include <optix.h>
@@ -18,6 +12,7 @@
 #include <ctime>
 #include <cmath>
 #include <cassert>
+#include <fstream>
 
 //------------------------------------------------------------------------------
 //  Helpers
@@ -91,15 +86,11 @@ struct PayloadVis { unsigned int flag; };
 extern "C" __global__ void __raygen__rg() 
 {
     uint32_t src   = optixGetLaunchIndex().y;   // row
-    uint32_t wID   = optixGetLaunchIndex().x;   // word along the row
+    uint32_t wID = optixGetLaunchIndex().x;   // word index in that row
     uint32_t dst0  = wID << 5;                  // first dest in this word
 
-    // position in packed buffer
-    // 先算出这一行在上三角矩阵里的首位 bit 索引
-	uint64_t rowStart = (uint64_t)src * lp.triCount
-					  - (uint64_t)src * (src - 1) / 2;
-	// 再算出这一组 32 位 word 的下标
-	uint64_t wordIdx = (rowStart >> 5) + wID;
+    uint32_t wordsPerRow = (lp.triCount + 31u) >> 5;
+	uint64_t wordIdx = uint64_t(src) * wordsPerRow + wID;
 
     float3 o = lp.triCentres[src];
     unsigned int bits = 0u;
@@ -109,13 +100,13 @@ extern "C" __global__ void __raygen__rg()
     {
         uint32_t dst = dst0 + lane;
         if (dst >= lp.triCount) break;
-        if (dst == src) { bits |= 1u << lane; continue; }
+        if (dst <= src) { bits |= 0u << lane; continue; }
 
 		float3 t = lp.triCentres[dst];
         float3 d    = t - o;
         float  dist = length(d);
-        float  tmin = 1e-4f;                  // 跳过自身相交
-        float  tmax = dist - 1e-4f;           // 跳过目标自身
+        float  tmin = 1e-4f;                  
+        float  tmax = dist - 1e-4f;           
 		
 		//if(src%1000==0)
 		//printf("centroid[%d] = (%f, %f, %f)\n", src, o.x, o.y, o.z);			
@@ -279,25 +270,25 @@ bool OptixApp::buildAccel()
 	CUDA_CHECK(cudaFree((void*)d_temp));
 
 
-	//size_t compactedSize = 0;
-	//CUDA_CHECK(cudaMemcpy(&compactedSize, reinterpret_cast<void*>(d_compactedSize),
-	//	sizeof(size_t), cudaMemcpyDeviceToHost));
-	//CUDA_CHECK(cudaFree(reinterpret_cast<void*>(d_compactedSize)));
+	size_t compactedSize = 0;
+	CUDA_CHECK(cudaMemcpy(&compactedSize, reinterpret_cast<void*>(d_compactedSize),
+		sizeof(size_t), cudaMemcpyDeviceToHost));
+	CUDA_CHECK(cudaFree(reinterpret_cast<void*>(d_compactedSize)));
 
-	//CUdeviceptr d_compactedOutputBuffer  = 0;
-	//CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_compactedOutputBuffer), compactedSize));
+	CUdeviceptr d_compactedOutputBuffer = 0;
+	CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_compactedOutputBuffer), compactedSize));
 
-	//if (compactedSize < sizes.outputSizeInBytes) {
-	//	optixAccelCompact(
-	//		optixContext, 0,
-	//		gasHandle,
-	//		d_compactedOutputBuffer, compactedSize,
-	//		&compactedAccelHandle);
-	//}
+	if (compactedSize < sizes.outputSizeInBytes) {
+		optixAccelCompact(
+			optixContext, 0,
+			gasHandle,
+			d_compactedOutputBuffer, compactedSize,
+			&compactedAccelHandle);
+	}
 
-	//CUDA_CHECK(cudaFree(reinterpret_cast<void*>(d_gasOutputBuffer)));
-	//gasHandle = compactedAccelHandle;   // 用压缩后的 handle 替换
-	//d_gasOutputBuffer = d_compactedOutputBuffer;
+	CUDA_CHECK(cudaFree(reinterpret_cast<void*>(d_gasOutputBuffer)));
+	gasHandle = compactedAccelHandle;   // 用压缩后的 handle 替换
+	d_gasOutputBuffer = d_compactedOutputBuffer;
 
 	// upload centroids
 	CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_triCentre), centroids.size() * sizeof(float3)));
@@ -305,7 +296,7 @@ bool OptixApp::buildAccel()
 		centroids.size() * sizeof(float3), cudaMemcpyHostToDevice));
 
 	std::cout << "GAS built (" << sizes.outputSizeInBytes / 1e6 << " MB)\n";
-	//std::cout << "Compacted:" << compactedSize / 1e6 << " MB)\n";
+	std::cout << "Compacted:" << compactedSize / 1e6 << " MB)\n";
 	return true;
 }
 
@@ -448,7 +439,8 @@ bool OptixApp::launch()
 	const uint32_t N = static_cast<uint32_t>(centroids.size());
 
 	// Vis matrix words (upper‑triangle)
-	const uint64_t totalWords = ((uint64_t)N * (N + 31ull)) >> 6;  // N*(N+31)/64
+	uint32_t wordsPerRow = (N + 31) >> 5;
+	const uint64_t totalWords = ((uint64_t)N * (N + 31ull)) >> 5;  // N*(N+31)/32
 	CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_visBits), totalWords * sizeof(uint32_t)));
 	CUDA_CHECK(cudaMemset((void*)d_visBits, 0, totalWords * sizeof(uint32_t)));
 
@@ -468,11 +460,8 @@ bool OptixApp::launch()
 	CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_params), sizeof(params)));
 	CUDA_CHECK(cudaMemcpy((void*)d_params, &params, sizeof(params), cudaMemcpyHostToDevice));
 
-	uint32_t wordsPerRow = (N + 31) >> 5;
-
 	cudaEvent_t start, stop; cudaEventCreate(&start); cudaEventCreate(&stop);
 	cudaEventRecord(start);
-
 
 	OPTIX_CHECK(optixLaunch(pipeline, 0, d_params, sizeof(params), &sbt,
 		wordsPerRow, N, 1));
@@ -487,6 +476,23 @@ bool OptixApp::launch()
 	CUDA_CHECK(cudaMemcpy(hostBits.data(), (void*)d_visBits,
 		totalWords * sizeof(uint32_t),
 		cudaMemcpyDeviceToHost));
+
+	for (uint32_t i = 0; i < N; ++i) {
+		for (uint32_t w = 0; w < wordsPerRow; ++w) {
+			uint32_t word = hostBits[i * wordsPerRow + w];
+			for (int lane = 0; lane < 32; ++lane) {
+				uint32_t j = (w << 5) + lane;
+				if (j < N && j > i) {
+					// bit (i,j) 存在 word 的 lane 位上
+					// 把它写到 (j,i) 上：
+					uint32_t dstWordIdx = j * wordsPerRow + (i >> 5);
+					uint32_t  dstLane = i & 31;
+					if (word & (1u << lane))
+						hostBits[dstWordIdx] |= (1u << dstLane);
+				}
+			}
+		}
+	}
 
 	std::ofstream fout("vis.bin", std::ios::binary);
 	fout.write(reinterpret_cast<char*>(hostBits.data()),

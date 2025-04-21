@@ -11,7 +11,7 @@ int main(int argc, char** argv) {
 		return EXIT_FAILURE;
 	}
 
-	std::string objPath = "D:\\Documents\\CODES\\OptixTest\\assets\\NIST_Segmented_voxel0.16.obj";
+	std::string objPath = "D:\\Documents\\CODES\\OptixTest\\assets\\DoublePassNIST_Mesh.obj";
 	if (!app.loadObj(objPath)) {
 		std::cerr << "Loading OBJ failed" << objPath << "\n";
 		return EXIT_FAILURE;
