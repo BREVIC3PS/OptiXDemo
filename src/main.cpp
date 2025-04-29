@@ -37,6 +37,8 @@ int main(int argc, char** argv) {
 		return EXIT_FAILURE;
 	}*/
 
+	app.verifyPairs();
+
 	app.cleanup();
 	return EXIT_SUCCESS;
 }

@@ -16,6 +16,11 @@ public:
 	bool  buildAccel();
 	bool  setupPipeline();
 	bool  launch();
+
+	void verifyPairs();
+public:
+	bool SaveVM(const uint32_t N, std::vector<uint32_t>& hostBits, uint32_t wordsPerRow);
+
 	void  cleanup();
 
 private:
@@ -23,6 +28,7 @@ private:
 	std::vector<float>            vertices;      // xyz …
 	std::vector<unsigned int>     indices;       // i0 i1 i2 …
 	std::vector<float3>           centroids;     // per‑triangle centre
+	std::vector<uint32_t> hostBits;
 
 	// CUDA / OptiX handles
 	CUcontext                     cuCtx = 0;
@@ -47,5 +53,4 @@ private:
 	// constants
 	unsigned int kSMMajor = 7, kSMMinor = 0;   // change to your GPU
 };
-
 #endif // OPTIX_APP_H

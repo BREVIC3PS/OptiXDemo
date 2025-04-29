@@ -77,6 +77,7 @@ struct LaunchParams
     float3*                 triCentres;
     uint32_t                triCount;   // N
     OptixTraversableHandle  tlas;
+	float epsilon;
 };
 
 __constant__ LaunchParams lp;
@@ -93,7 +94,7 @@ extern "C" __global__ void __raygen__rg()
     uint32_t wordsPerRow = (lp.triCount + 31u) >> 5;
 	uint64_t wordIdx = uint64_t(src) * wordsPerRow + wID;
 
-    float3 o = lp.triCentres[src];
+    const float3 o = lp.triCentres[src];
     unsigned int bits = 0u;
 
     #pragma unroll
@@ -106,8 +107,8 @@ extern "C" __global__ void __raygen__rg()
 		float3 t = lp.triCentres[dst];
         float3 d    = t - o;
         float  dist = length(d);
-        float  tmin = 1e-4f;                  
-        float  tmax = dist - 1e-4f;           
+        float  tmin = lp.epsilon;                  
+        float  tmax = dist - lp.epsilon;           
 		
 		//if(src%1000==0)
 		//printf("centroid[%d] = (%f, %f, %f)\n", src, o.x, o.y, o.z);			
@@ -311,7 +312,7 @@ static std::string compilePTX(const char* code, int sm)
 
 	const std::string gpuArch = "--gpu-architecture=compute_" + std::to_string(sm);
 	std::vector<std::string> include_paths = {
-		"--use_fast_math",
+
 		"-IC:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.3/include",
 		"-IC:/ProgramData/NVIDIA Corporation/OptiX SDK 9.0.0/include",
 		"-IC:/ProgramData/NVIDIA Corporation/OptiX SDK 9.0.0/SDK",
@@ -450,12 +451,15 @@ bool OptixApp::launch()
 		uint32_t* visBits; 
 		float3* triCentres;
 		uint32_t triCount; 
-		OptixTraversableHandle tlas; } 
+		OptixTraversableHandle tlas; 
+		float epsilon;
+	} 
 	params;
 	params.visBits = (uint32_t*)d_visBits;
 	params.triCentres = (float3*)d_triCentre;
 	params.triCount = N;
 	params.tlas = gasHandle;
+	params.epsilon = 1e-4f;
 
 	CUdeviceptr d_params; 
 	CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_params), sizeof(params)));
@@ -473,7 +477,7 @@ bool OptixApp::launch()
 	cudaEventDestroy(start); cudaEventDestroy(stop);
 
 	// read back & save here
-	std::vector<uint32_t> hostBits(totalWords);
+	hostBits.resize(totalWords);
 	CUDA_CHECK(cudaMemcpy(hostBits.data(), (void*)d_visBits,
 		totalWords * sizeof(uint32_t),
 		cudaMemcpyDeviceToHost));
@@ -493,6 +497,20 @@ bool OptixApp::launch()
 		}
 	}
 
+	return SaveVM(N, hostBits, wordsPerRow);
+
+
+	/*std::ofstream fout("vis.bin", std::ios::binary);
+	fout.write(reinterpret_cast<char*>(hostBits.data()),
+		hostBits.size() * sizeof(uint32_t));
+	fout.close();*/
+
+	CUDA_CHECK(cudaFree((void*)d_params));
+	return true;
+}
+
+bool OptixApp::SaveVM(const uint32_t N, std::vector<uint32_t>& hostBits, uint32_t wordsPerRow)
+{
 	std::string outputPrefix = "VMCache";
 	bool showProgress = true;
 
@@ -530,14 +548,6 @@ bool OptixApp::launch()
 	if (showProgress) std::cout << "\rProgress: 100%\n";
 
 	for (auto& f : ofs) f.close();
-
-	/*std::ofstream fout("vis.bin", std::ios::binary);
-	fout.write(reinterpret_cast<char*>(hostBits.data()),
-		hostBits.size() * sizeof(uint32_t));
-	fout.close();*/
-
-	CUDA_CHECK(cudaFree((void*)d_params));
-	return true;
 }
 
 //------------------------------------------------------------------------------
@@ -563,4 +573,98 @@ void OptixApp::cleanup()
 	if (optixContext) OPTIX_CHECK(optixDeviceContextDestroy(optixContext));
 }
 
+struct _float3 { float x, y, z; };
+inline _float3 operator-(const _float3& a, const _float3& b) { return { a.x - b.x,a.y - b.y,a.z - b.z }; }
+inline _float3 operator+(const _float3& a, const _float3& b) { return { a.x + b.x,a.y + b.y,a.z + b.z }; }
+inline _float3 operator*(const _float3& a, float s) { return { a.x * s,a.y * s,a.z * s }; }
+inline float dot(const _float3& a, const _float3& b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+inline _float3 cross(const _float3& a, const _float3& b) {
+	return { a.y * b.z - a.z * b.y,
+			 a.z * b.x - a.x * b.z,
+			 a.x * b.y - a.y * b.x };
+}
+inline float length(const _float3& v) { return std::sqrt(dot(v, v)); }
+inline _float3 normalize(const _float3& v) { float l = length(v); return { v.x / l,v.y / l,v.z / l }; }
 
+bool intersectTriangle(
+	const _float3& orig, const _float3& dir,
+	const _float3& v0, const _float3& v1, const _float3& v2,
+	float tmin, float tmax
+) {
+	const _float3 edge1 = v1 - v0;
+	const _float3 edge2 = v2 - v0;
+	const _float3 pvec = cross(dir, edge2);
+	float det = dot(edge1, pvec);
+	if (std::fabs(det) < 1e-8f) return false;
+	float invDet = 1.0f / det;
+	const _float3 tvec = orig - v0;
+	float u = dot(tvec, pvec) * invDet;
+	if (u < 0.0f || u > 1.0f) return false;
+	const _float3 qvec = cross(tvec, edge1);
+	float v = dot(dir, qvec) * invDet;
+	if (v < 0.0f || u + v > 1.0f) return false;
+	float t = dot(edge2, qvec) * invDet;
+	return (t >= tmin && t <= tmax);
+}
+
+bool cpuCheckVis(
+	int src, int dst,
+	const std::vector<_float3>& centroids,
+	const std::vector<float>& vertices,  // 按 (v0,v1,v2) 三顶点顺序扁平化
+	float eps = 1e-4f
+) {
+	_float3 o = centroids[src];
+	_float3 t = centroids[dst];
+	_float3 dir = normalize(t - o);
+	float dist = length(t - o);
+	float tmin = eps, tmax = dist - eps;
+
+	int triCount = (int)centroids.size();
+	for (int k = 0; k < triCount; ++k) {
+		if (k == src || k == dst) continue;
+
+		int base = 9 * k;
+		_float3 v0{ vertices[base + 0], vertices[base + 1], vertices[base + 2] };
+		_float3 v1{ vertices[base + 3], vertices[base + 4], vertices[base + 5] };
+		_float3 v2{ vertices[base + 6], vertices[base + 7], vertices[base + 8] };
+
+		if (intersectTriangle(o + dir * eps, dir, v0, v1, v2, tmin, tmax)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+void OptixApp::verifyPairs() {
+	int N = (int)centroids.size();
+	int wordsPerRow = (N + 31) >> 5;
+
+	std::vector<std::pair<int, int>> tests = {
+
+		{840,10230},{840,10232},{840,10239},{840,10245},{840,10246},{840,10247},{840,10248},{840,10249},{840,10250},{840,10251},{840,10252},{840,10254},{840,10255},{840,10256},{840,10257},{840,10259},{840,10261},{840,10262},{840,10268},{840,10275},{840,10276},{840,10277},{840,10284},{840,10285},{840,10286},{840,10295},{840,10296},{840,10299},{840,10300},{840,10304},{840,10309},{840,10314},{840,10318},{840,10782},{840,10783},{840,10812},{840,10813},{840,10816},{840,10817},{840,10818},{840,10826},{840,10828},{840,10830},{840,10831},{840,10833},{840,10834},{840,10835},{840,10836},{840,10838},{840,10840},{840,10841},{840,10842},{840,10850},{840,10851},{840,10852},{840,10853},{840,10855},{840,10856},{840,10857}
+	};
+
+	std::vector<_float3> _centroids;
+	for (auto& c : centroids)
+	{
+		_centroids.push_back({ c.x,c.y,c.z });
+	}
+
+	int correct = 0;
+	for (std::pair<int, int>& p : tests) {
+		int i = p.first, j = p.second;
+		int wordIdx = i * wordsPerRow + (j >> 5);
+		bool gpuVis = (hostBits[wordIdx] >> (j & 31)) & 1u;
+
+		bool cpuVis = cpuCheckVis(i, j, _centroids, vertices);
+
+		std::cout << "pair (" << i << "," << j << ") : "
+			<< "GPU_vis=" << (gpuVis ? "Y" : "N")
+			<< "  CPU_vis=" << (cpuVis ? "Y" : "N")
+			<< (gpuVis == cpuVis ? " OK" : " Fail") << "\n";
+
+		if (gpuVis == cpuVis)correct++;
+
+	}
+	std::cout << (float)correct / (float)tests.size() << std::endl;
+}
